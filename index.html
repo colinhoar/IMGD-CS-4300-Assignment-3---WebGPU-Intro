@@ -4,65 +4,160 @@
 <head>
     <meta charset=utf-8>
     <script src=gulls.js ></script>
+    <script src=video.js ></script>
+    <script src=mouse.js ></script>
     <style> body { margin:0 } </style>
     <script>
         async function run() {
-            const sg = await gulls.init()
+            const sg = await gulls.init();
+            Mouse.init();
+            const quadVertexShader = gulls.constants.vertex;
 
-            // a simple vertex shader to make a quad
-            const quadVertexShader = gulls.constants.vertex
-
-            // our fragment shader, just returns blue
             const fragmentShader = `
-              @group(0) @binding(0) var<uniform> res   : vec2f;
-              @group(0) @binding(1) var<uniform> frame : f32;
-              @group(0) @binding(2) var<uniform> slider : f32;
+                //  MIT License. © Ian McEwan, Stefan Gustavson, Munrocket, Johan Helsing
+                //
+                fn mod289(x: vec2f) -> vec2f {
+                    return x - floor(x * (1. / 289.)) * 289.;
+                }
+
+                fn mod289_3(x: vec3f) -> vec3f {
+                    return x - floor(x * (1. / 289.)) * 289.;
+                }
+
+                fn permute3(x: vec3f) -> vec3f {
+                    return mod289_3(((x * 34.) + 1.) * x);
+                }
+
+                //  MIT License. © Ian McEwan, Stefan Gustavson, Munrocket
+                fn simplexNoise2(v: vec2f) -> f32 {
+                    let C = vec4(
+                        0.211324865405187, // (3.0-sqrt(3.0))/6.0
+                        0.366025403784439, // 0.5*(sqrt(3.0)-1.0)
+                        -0.577350269189626, // -1.0 + 2.0 * C.x
+                        0.024390243902439 // 1.0 / 41.0
+                    );
+
+                    // First corner
+                    var i = floor(v + dot(v, C.yy));
+                    let x0 = v - i + dot(i, C.xx);
+
+                    // Other corners
+                    var i1 = select(vec2(0., 1.), vec2(1., 0.), x0.x > x0.y);
+
+                    // x0 = x0 - 0.0 + 0.0 * C.xx ;
+                    // x1 = x0 - i1 + 1.0 * C.xx ;
+                    // x2 = x0 - 1.0 + 2.0 * C.xx ;
+                    var x12 = x0.xyxy + C.xxzz;
+                    x12.x = x12.x - i1.x;
+                    x12.y = x12.y - i1.y;
+
+                    // Permutations
+                    i = mod289(i); // Avoid truncation effects in permutation
+
+                    var p = permute3(permute3(i.y + vec3(0., i1.y, 1.)) + i.x + vec3(0., i1.x, 1.));
+                    var m = max(0.5 - vec3(dot(x0, x0), dot(x12.xy, x12.xy), dot(x12.zw, x12.zw)), vec3(0.));
+                    m *= m;
+                    m *= m;
+
+                    // Gradients: 41 points uniformly over a line, mapped onto a diamond.
+                    // The ring size 17*17 = 289 is close to a multiple of 41 (41*7 = 287)
+                    let x = 2. * fract(p * C.www) - 1.;
+                    let h = abs(x) - 0.5;
+                    let ox = floor(x + 0.5);
+                    let a0 = x - ox;
+
+                    // Normalize gradients implicitly by scaling m
+                    // Approximation of: m *= inversesqrt( a0*a0 + h*h );
+                    m *= 1.79284291400159 - 0.85373472095314 * (a0 * a0 + h * h);
+
+                    // Compute final noise value at P
+                    let g = vec3(a0.x * x0.x + h.x * x0.y, a0.yz * x12.xz + h.yz * x12.yw);
+                    return 130. * dot(m, g);
+                }
+
+              @group(0) @binding(0) var<uniform> resolution: vec2f;
+              @group(0) @binding(1) var videoSampler: sampler;
+              @group(0) @binding(2) var<uniform> time: f32;
+              @group(0) @binding(3) var<uniform> slider: f32;
+              @group(0) @binding(4) var<uniform> checkbox: u32;
+              @group(0) @binding(5) var<uniform> mouse : vec3f;
+              @group(1) @binding(0) var videoBuffer: texture_external;
 
               @fragment
               fn fs( @builtin(position) pos : vec4f ) -> @location(0) vec4f {
-                let uv = pos.xy / res * slider;
-                return vec4f( uv.x, .5+sin(frame/60.)*.5, uv.y, 1. );
+                  let p = pos.xy / resolution;
+                  let d = distance(p, mouse.xy);
+                  let noise = simplexNoise2(p * 10.0 + vec2f(time * 0.2, -time * 0.1)) * slider;
+                  let angle = simplexNoise2(p * 3.0 + -time * 0.1) * slider;
+                  let direction = vec2f(cos(angle), sin(angle));
+                  var distort = p + direction * noise * 0.2;
+                  if (mouse.z == 1)
+                  {
+                      let reverberation = (sin(d * 40.0 - time * 5.0)) * 0.03;
+                      distort = distort + reverberation;
+                  }
+                  let video = textureSampleBaseClampToEdge( videoBuffer, videoSampler, distort );
+                  let waterColor = vec3f(0.0, 0.6, 0.7);
+                  let n = (noise * 0.5 + 0.5 ) * 0.6;
+                  let mouseInfluence = smoothstep(0.1, 0.0, d);
+                  let mouseColor = vec3f(0.0, 0.8, 0.8);
+                  let colored = mix(video.rgb, waterColor, n);
+                  let finalColored = mix(colored, mouseColor, mouseInfluence);
+                  var finalColor = video.rgb;
+                  if (checkbox != 0)
+                  {
+                      finalColor = finalColored;
+                  }
+                  return vec4f(finalColor , 1.0 );
               }
             `
 
-            // our vertex + fragment shader together
-            const shader = quadVertexShader + fragmentShader
-
+            const shader = quadVertexShader + fragmentShader;
             const slider = document.querySelector('#slider');
-            let slider_u = sg.uniform( slider.value );
-            // create a render pass
-            let frame = sg.uniform( 0 )
-            const renderPass = await sg.render({
+            let slider_u = sg.uniform(slider.value);
+            const checkbox = document.querySelector('#checkbox');
+            let checkbox_u = sg.uniform(checkbox.checked ? 1 : 0);
+            await Video.init();
+            let time = sg.uniform(0);
+            const mouse = sg.uniform( Mouse.values );
+            const render = await sg.render({
                 shader,
-                // add a data array to specify uniforms / buffers / textures etc.
                 data:[
-                    sg.uniform([ window.innerWidth, window.innerHeight ]),
-                    // make sure this is second so it gets bound to index 1
-                    frame,
-                    slider_u
+                    sg.uniform([ sg.width, sg.height ]),
+                    sg.sampler(),
+                    time,
+                    sg.video( Video.element),
+                    slider_u,
+                    checkbox_u,
+                    mouse
                 ],
-                onframe() { frame.value++ }
+                onframe()
+                {
+                    time.value += 0.15;
+                    mouse.value = Mouse.values;
+                }
             })
 
             slider.oninput = () => slider_u.value = slider.value;
+            checkbox.oninput = () => checkbox_u.value = checkbox.checked ? 1 : 0;
 
-            // run our render pass
-            sg.run( renderPass )
+            await sg.run( render );
         }
 
-        run()
+        run();
     </script>
 </head>
 
 <body>
+<label for="slider" style="font-size: 20px">Adjust rippling intensity:</label>
+<input type="range" id="slider" min="-1" max="1" step="0.01" value="0.1">
+<br>
+<label for="checkbox" style="font-size: 20px">Toggle Color:</label>
+<input type="checkbox" id="checkbox" checked>
+<p style="font-size: 20px; margin-top: 0; margin-bottom: 0" id="cursor-move">Move cursor around to have light follow (only with color on)</p>
+<label for="click" style="float: right; font-size: 20px">Source for simplex noise implementation: <a href="https://gist.github.com/munrocket/236ed5ba7e409b8bdf1ff6eca5dcdc39">https://gist.github.com/munrocket/236ed5ba7e409b8bdf1ff6eca5dcdc39</a></label>
+<p style="font-size: 20px; margin-top: 0; margin-bottom: 0" id="click">Hold down left-click for reverberation around cursor</p>
 <canvas></canvas>
-<input
-        type=range
-        id=slider
-        min=0 max=4
-        step=any
-        style='position:absolute; left:0; top:0; z-index:1'
-/>
 </body>
 
 </html>
